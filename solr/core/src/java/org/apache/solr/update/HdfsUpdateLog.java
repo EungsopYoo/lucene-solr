@@ -117,18 +117,12 @@ public class HdfsUpdateLog extends UpdateLog {
   @Override
   public void init(UpdateHandler uhandler, SolrCore core) {
     
-    // ulogDir from CoreDescriptor overrides
-    String ulogDir = core.getCoreDescriptor().getUlogDir();
-
     this.uhandler = uhandler;
     
     synchronized (fsLock) {
       // just like dataDir, we do not allow
       // moving the tlog dir on reload
       if (fs == null) {
-        if (ulogDir != null) {
-          dataDir = ulogDir;
-        }
         if (dataDir == null || dataDir.length() == 0) {
           dataDir = core.getDataDir();
         }
@@ -155,8 +149,9 @@ public class HdfsUpdateLog extends UpdateLog {
         return;
       }
     }
-    
-    tlogDir = new Path(dataDir, TLOG_NAME);
+
+    updateTlogDir(core);
+
     while (true) {
       try {
         if (!fs.exists(tlogDir)) {
@@ -256,7 +251,17 @@ public class HdfsUpdateLog extends UpdateLog {
     }
     
   }
-  
+
+  private void updateTlogDir(SolrCore core) {
+    // ulogDir from CoreDescriptor overrides
+    String ulogDir = core.getCoreDescriptor().getUlogDir();
+    if (ulogDir == null || ulogDir.trim().length() == 0) {
+      tlogDir = new Path(dataDir, TLOG_NAME);
+    } else {
+      tlogDir = new Path(ulogDir);
+    }
+  }
+
   @Override
   public String getLogDir() {
     return tlogDir.toUri().toString();

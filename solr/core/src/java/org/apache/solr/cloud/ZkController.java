@@ -862,6 +862,7 @@ public final class ZkController {
       String ourUrl = ZkCoreNodeProps.getCoreUrl(baseUrl, coreName);
       log.info("We are " + ourUrl + " and leader is " + leaderUrl);
       boolean isLeader = leaderUrl.equals(ourUrl);
+      RecoveryChecker recoveryChecker = new RecoveryChecker(isLeader);
       
       try (SolrCore core = cc.getCore(desc.getName())) {
         
@@ -877,7 +878,8 @@ public final class ZkController {
         if (!afterExpiration && !core.isReloaded() && ulog != null) {
           // disable recovery in case shard is in construction state (for shard splits)
           Slice slice = getClusterState().getSlice(collection, shardId);
-          if (slice.getState() != Slice.State.CONSTRUCTION || !isLeader) {
+          recoveryChecker.checkAutoAddReplicas(core, slice, collection);
+          if (slice.getState() != Slice.State.CONSTRUCTION || recoveryChecker.needRecovery) {
             Future<UpdateLog.RecoveryInfo> recoveryFuture = core.getUpdateHandler().getUpdateLog().recoverFromLog();
             if (recoveryFuture != null) {
               log.info("Replaying tlog for " + ourUrl + " during startup... NOTE: This can take a while.");
@@ -890,7 +892,8 @@ public final class ZkController {
             }
           }
         }
-        boolean didRecovery = checkRecovery(coreName, desc, recoverReloadedCores, isLeader, cloudDesc, collection,
+        boolean didRecovery = checkRecovery(coreName, desc, recoverReloadedCores, isLeader,
+            recoveryChecker.needRecovery, cloudDesc, collection,
             coreZkNodeName, shardId, leaderProps, core, cc, afterExpiration);
         if (!didRecovery) {
           publish(desc, Replica.State.ACTIVE);
@@ -907,6 +910,24 @@ public final class ZkController {
     }
   }
 
+  private class RecoveryChecker {
+    private boolean needRecovery;
+
+    private RecoveryChecker(boolean isLeader) {
+      needRecovery = !isLeader;
+    }
+
+    private void checkAutoAddReplicas(SolrCore core, Slice slice, String collection) {
+      if (slice.getReplicas().size() == 1) {
+        Object autoAddReplicas = getClusterState().getCollection(collection)
+            .getProperties().get(ZkStateReader.AUTO_ADD_REPLICAS);
+        if (autoAddReplicas != null && Boolean.valueOf(autoAddReplicas.toString())) {
+          log.info("There is only one replica. This core should be recovered. core={}", core.toString());
+          needRecovery = true;
+        }
+      }
+    }
+  }
   // timeoutms is the timeout for the first call to get the leader - there is then
   // a longer wait to make sure that leader matches our local state
   private String getLeader(final CloudDescriptor cloudDesc, int timeoutms) {
@@ -1042,7 +1063,7 @@ public final class ZkController {
    * Returns whether or not a recovery was started
    */
   private boolean checkRecovery(String coreName, final CoreDescriptor desc,
-                                boolean recoverReloadedCores, final boolean isLeader,
+                                boolean recoverReloadedCores, final boolean isLeader, final boolean needRecovery,
                                 final CloudDescriptor cloudDesc, final String collection,
                                 final String shardZkNodeName, String shardId, ZkNodeProps leaderProps,
                                 SolrCore core, CoreContainer cc, boolean afterExpiration) {
@@ -1051,7 +1072,10 @@ public final class ZkController {
       return false;
     }
     boolean doRecovery = true;
-    if (!isLeader) {
+    if (!isLeader || needRecovery) {
+      if (isLeader) {
+        log.info("I am the leader, but there is only one replica. So recovery is necessary.");
+      }
 
       if (!afterExpiration && core.isReloaded() && !recoverReloadedCores) {
         doRecovery = false;
